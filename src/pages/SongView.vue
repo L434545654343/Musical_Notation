@@ -1,385 +1,156 @@
 <script setup>
-import { computed, ref, watchEffect, onBeforeUnmount } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { supabase } from '../lib/supabaseClient'
 
 const route = useRoute()
-const songId = computed(() => String(route.params.id ?? ''))
+const router = useRouter()
 
-const title = ref('')
-const bv = ref('')
-const tabText = ref('')
-const notFound = ref(false)
+const loading = ref(false)
+const error = ref('')
+const song = ref(null)
 
-const page = ref(1)
+function isUuid(v) {
+  return (
+    typeof v === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+  )
+}
 
-const saveStatus = ref('') // '', 'saving', 'saved'
-const hydrating = ref(false)
+function fmtTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString()
+}
 
-let saveTimer = null
+const bvid = computed(() => (song.value?.bv ?? '').trim())
+const biliEmbedUrl = computed(() => {
+  if (!bvid.value) return ''
+  return `https://player.bilibili.com/player.html?bvid=${encodeURIComponent(bvid.value)}&page=1`
+})
+const biliUrl = computed(() => {
+  if (!bvid.value) return ''
+  return `https://www.bilibili.com/video/${encodeURIComponent(bvid.value)}`
+})
 
-function persist() {
-  const id = songId.value.trim()
-  if (!id) return
-  if (notFound.value) return
-
-  const song = {
-    id,
-    title: title.value,
-    bv: bv.value,
-    tabText: tabText.value,
-    page: page.value,
-    updatedAt: new Date().toISOString(),
-  }
+async function loadSong() {
+  loading.value = true
+  error.value = ''
+  song.value = null
 
   try {
-    localStorage.setItem(`song:${id}`, JSON.stringify(song))
-    saveStatus.value = 'saved'
-  } catch {
-    saveStatus.value = ''
-  }
-}
+    const id = route.params.id
 
-async function copyTab() {
-  const text = String(tabText.value || '')
-  if (!text.trim()) {
-    alert('Tab 为空，没什么可复制的。')
-    return
-  }
-
-  try {
-    await navigator.clipboard.writeText(text)
-    alert('Tab 已复制到剪贴板')
-  } catch {
-    // 兼容性兜底
-    const ta = document.createElement('textarea')
-    ta.value = text
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-    alert('Tab 已复制到剪贴板')
-  }
-}
-
-/** 自动滚动（px/s） */
-const autoScrollOn = ref(false)
-const scrollSpeed = ref(60)
-const tabScrollEl = ref(null)
-
-let rafId = 0
-let lastTs = 0
-
-function stopAutoScroll() {
-  autoScrollOn.value = false
-  if (rafId) cancelAnimationFrame(rafId)
-  rafId = 0
-  lastTs = 0
-}
-
-function startAutoScroll() {
-  if (!tabScrollEl.value) return
-
-  // 开始滚动时退出编辑状态，让 readonly 更“明显”
-  document.activeElement?.blur?.()
-
-  autoScrollOn.value = true
-  lastTs = 0
-
-  const tick = (ts) => {
-    if (!autoScrollOn.value || !tabScrollEl.value) return
-
-    if (!lastTs) lastTs = ts
-    const dt = (ts - lastTs) / 1000
-    lastTs = ts
-
-    const el = tabScrollEl.value
-    const max = el.scrollHeight - el.clientHeight
-    const next = Math.min(max, el.scrollTop + scrollSpeed.value * dt)
-    el.scrollTop = next
-
-    // 到底自动停
-    if (next >= max - 1) {
-      stopAutoScroll()
+    if (!isUuid(id)) {
+      error.value = '这个歌曲 ID 不是合法的 UUID（可能是旧链接）。请从 Home 进入。'
       return
     }
 
-    rafId = requestAnimationFrame(tick)
-  }
+    const { data: sess } = await supabase.auth.getSession()
+    const session = sess.session
+    if (!session) {
+      router.push('/auth')
+      return
+    }
 
-  rafId = requestAnimationFrame(tick)
-}
+    const { data, error: e } = await supabase
+      .from('songs')
+      .select('id,title,bv,tab_text,created_at')
+      .eq('id', id)
+      .single()
 
-function toggleAutoScroll() {
-  if (autoScrollOn.value) stopAutoScroll()
-  else startAutoScroll()
-}
-
-function scrollToTop() {
-  if (!tabScrollEl.value) return
-  tabScrollEl.value.scrollTop = 0
-}
-
-onBeforeUnmount(() => {
-  if (rafId) cancelAnimationFrame(rafId)
-})
-
-function deleteSong() {
-  const id = songId.value.trim()
-  if (!id) return
-  if (!confirm('确定删除这首歌吗？删除后无法恢复。')) return
-
-  localStorage.removeItem(`song:${id}`)
-  window.location.href = '/'
-}
-
-// 读取 localStorage
-watchEffect(() => {
-  hydrating.value = true
-  saveStatus.value = ''
-  notFound.value = false
-
-  const id = songId.value.trim()
-  if (!id) {
-    hydrating.value = false
-    return
-  }
-
-  const raw = localStorage.getItem(`song:${id}`)
-  if (!raw) {
-    notFound.value = true
-    title.value = ''
-    bv.value = ''
-    tabText.value = ''
-    page.value = 1
-    hydrating.value = false
-    return
-  }
-
-  try {
-    const song = JSON.parse(raw)
-    title.value = String(song.title ?? '')
-    bv.value = String(song.bv ?? '')
-    tabText.value = String(song.tabText ?? '')
-    page.value = Number(song.page ?? 1) || 1
-  } catch {
-    notFound.value = true
-    title.value = ''
-    bv.value = ''
-    tabText.value = ''
-    page.value = 1
+    if (e) throw e
+    song.value = data
+  } catch (e) {
+    error.value = e?.message ?? String(e)
   } finally {
-    hydrating.value = false
+    loading.value = false
   }
-})
+}
 
-// 防抖保存
-watchEffect(() => {
-  if (hydrating.value) return
-  if (notFound.value) return
+async function removeSong() {
+  if (!song.value?.id) return
+  if (!confirm('确定删除这条歌曲吗？')) return
 
-  // 触发依赖收集
-  title.value
-  bv.value
-  tabText.value
-  page.value
+  const { error: e } = await supabase.from('songs').delete().eq('id', song.value.id)
+  if (e) {
+    alert(e.message)
+    return
+  }
+  router.push('/')
+}
 
-  saveStatus.value = 'saving'
-  if (saveTimer) clearTimeout(saveTimer)
+async function copyLink() {
+  if (!song.value?.id) return
+  const url = `${location.origin}/songs/${song.value.id}`
+  try {
+    await navigator.clipboard.writeText(url)
+    alert('已复制链接')
+  } catch {
+    prompt('复制这个链接：', url)
+  }
+}
 
-  saveTimer = setTimeout(() => {
-    persist()
-  }, 500)
-})
-
-const bvidInputError = computed(() => bv.value.trim() !== '' && !bv.value.trim().startsWith('BV'))
-
-const embedUrl = computed(() => {
-  const bvid = bv.value.trim()
-  if (!bvid) return ''
-  const p = Number(page.value || 1) || 1
-  // danmaku=0：尽量关闭弹幕
-  return `https://player.bilibili.com/player.html?bvid=${encodeURIComponent(bvid)}&page=${encodeURIComponent(
-    String(p)
-  )}&autoplay=0&danmaku=0`
-})
+onMounted(loadSong)
 </script>
 
 <template>
-  <div style="padding: 16px; display: grid; gap: 12px;">
-    <header style="display: grid; gap: 8px;">
-      <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-        <button
-          type="button"
-          @click="$router.push('/')"
-          style="padding: 6px 10px; border-radius: 8px; border: 1px solid #ccc; background: #fff;"
-        >
-          ← 返回列表
-        </button>
-
-        <h1 style="margin: 0;">
-          {{ title || 'Song View' }}
-        </h1>
-
-        <button
-          type="button"
-          @click="deleteSong"
-          style="margin-left:auto; padding: 6px 10px; border-radius: 8px; border: 1px solid #b00020; background: #fff; color:#b00020;"
-        >
-          删除
-        </button>
+  <div class="container">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+      <h1 style="margin:0;">Song</h1>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <button @click="$router.push('/')">返回</button>
+        <button @click="copyLink" :disabled="!song?.id">复制链接</button>
+        <button class="danger" @click="removeSong" :disabled="!song?.id">删除</button>
       </div>
-
-      <div style="color: #666;">songId: {{ songId }}</div>
-    </header>
-
-    <div
-      v-if="notFound"
-      style="padding: 12px; border: 1px solid #f3c2c2; background: #fff5f5; border-radius: 8px; color: #7a1f1f; display:grid; gap:10px;"
-    >
-      <div>
-        未找到该歌曲（localStorage 中不存在 <code>song:{{ songId }}</code>）。
-        你可以先去 <code>/upload</code> 创建一条。
-      </div>
-
-      <button
-        type="button"
-        @click="$router.push('/upload')"
-        style="padding: 10px 12px; border-radius: 8px; border: 1px solid #111; background: #111; color: #fff; width: fit-content;"
-      >
-        去 Upload 创建
-      </button>
     </div>
 
-    <section v-else style="display: grid; gap: 10px;">
-      <!-- 视频：最大宽度 720px，保持 16:9 原比例（aspect-ratio）并居中 -->
-      <section
-        v-if="embedUrl"
-        style="display: grid; gap: 8px; max-width: 720px; width: 100%; margin: 0 auto;"
-      >
-        <h2 style="margin: 0;">视频</h2>
-        <iframe
-          :src="embedUrl"
-          scrolling="no"
-          frameborder="0"
-          allowfullscreen="true"
-          style="width: 100%; aspect-ratio: 16 / 9; border: 1px solid #eee; border-radius: 8px;"
-        />
-      </section>
+    <div class="hr"></div>
 
-      <!-- 基本信息：全宽 -->
-      <div
-        style="display:grid; gap:10px; grid-template-columns: 1fr 1fr 140px; align-items:end; width: 100%;"
-      >
-        <label style="display: grid; gap: 6px;">
-          <span>标题</span>
-          <input
-            v-model="title"
-            placeholder="歌曲标题"
-            style="padding: 8px; border: 1px solid #ccc; border-radius: 6px; width: 100%; box-sizing: border-box;"
-          />
-        </label>
+    <div v-if="loading" class="muted">加载中…</div>
+    <div v-if="error" style="color:#b91c1c;">{{ error }}</div>
 
-        <label style="display: grid; gap: 6px;">
-          <span>B 站 BV 号</span>
-          <input
-            v-model="bv"
-            placeholder="例如：BV1..."
-            style="padding: 8px; border: 1px solid #ccc; border-radius: 6px; width: 100%; box-sizing: border-box;"
-          />
-        </label>
-
-        <label style="display: grid; gap: 6px;">
-          <span>分 P</span>
-          <input
-            v-model.number="page"
-            type="number"
-            min="1"
-            step="1"
-            style="padding: 8px; border: 1px solid #ccc; border-radius: 6px; width: 100%; box-sizing: border-box;"
-          />
-        </label>
-      </div>
-
-      <p v-if="bvidInputError" style="margin: 0; color: #b00020;">
-        看起来不像 BV 号（应以 “BV” 开头）。
-      </p>
-
-      <!-- 谱子：全宽 + 更大的可视高度 -->
-      <div style="display: grid; gap: 6px; width: 100%;">
-        <div
-          style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;"
-        >
-          <span>Tab（谱子文本）</span>
-
-          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-            <label style="display:flex; align-items:center; gap:6px; color:#666; font-size:12px;">
-              速度(px/s)
-              <input
-                v-model.number="scrollSpeed"
-                type="number"
-                min="5"
-                max="600"
-                step="5"
-                style="width: 92px; padding: 6px 8px; border-radius: 8px; border: 1px solid #ccc;"
-              />
-            </label>
-
-            <button
-              type="button"
-              @click="toggleAutoScroll"
-              style="padding: 6px 10px; border-radius: 8px; border: 1px solid #111; background: #111; color:#fff;"
-            >
-              {{ autoScrollOn ? '暂停滚动' : '开始滚动' }}
-            </button>
-
-            <button
-              type="button"
-              @click="scrollToTop"
-              style="padding: 6px 10px; border-radius: 8px; border: 1px solid #ccc; background: #fff;"
-            >
-              回到顶部
-            </button>
-
-            <button
-              type="button"
-              @click="copyTab"
-              style="padding: 6px 10px; border-radius: 8px; border: 1px solid #ccc; background: #fff;"
-            >
-              复制 Tab
-            </button>
+    <div v-if="song" style="display:grid; gap: 14px;">
+      <div class="listItem" style="margin:0;">
+        <div>
+          <div style="font-size:22px; font-weight:800;">{{ song.title }}</div>
+          <div class="muted" style="margin-top:6px; font-size:13px;">
+            BV：<span class="mono">{{ song.bv }}</span>
+            | created: {{ fmtTime(song.created_at) }}
+          </div>
+          <div class="muted" style="margin-top:6px; font-size:13px;">
+            id：<span class="mono">{{ song.id }}</span>
           </div>
         </div>
 
-        <div
-          ref="tabScrollEl"
-          style="max-height: 520px; overflow:auto; padding: 8px; border: 1px solid #ccc; border-radius: 6px; background:#fff; width: 100%; box-sizing: border-box;"
-        >
-          <textarea
-            v-model="tabText"
-            placeholder="在这里粘贴/编辑谱子…"
-            rows="14"
-            :readonly="autoScrollOn"
-            :style="{
-              width: '100%',
-              minHeight: '900px',
-              border: 0,
-              outline: 'none',
-              resize: 'vertical',
-              padding: 0,
-              boxSizing: 'border-box',
-              fontFamily:
-                `ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace`,
-              background: autoScrollOn ? '#fafafa' : '#fff',
-              cursor: autoScrollOn ? 'not-allowed' : 'text',
-            }"
-          />
+        <div style="display:flex; gap:10px; align-items:center;">
+          <a
+            v-if="biliUrl"
+            :href="biliUrl"
+            target="_blank"
+            rel="noreferrer"
+            style="text-decoration:none;"
+          >
+            <button type="button">原视频</button>
+          </a>
         </div>
       </div>
 
-      <div style="color: #666;">
-        <span v-if="saveStatus === 'saving'">正在保存…</span>
-        <span v-else-if="saveStatus === 'saved'">已保存</span>
+      <div v-if="biliEmbedUrl">
+        <iframe
+          :src="biliEmbedUrl"
+          style="width: 100%; aspect-ratio: 16/9; border: 0; background:#000; border-radius: 12px;"
+          allowfullscreen
+        />
       </div>
-    </section>
+
+      <div>
+        <div style="margin-bottom:8px;">谱子文本</div>
+        <pre
+          style="white-space: pre-wrap; padding: 12px; background:#fafafa; border:1px solid #eee; border-radius: 10px; margin:0;"
+        >{{ song.tab_text }}</pre>
+      </div>
+    </div>
   </div>
 </template>

@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { supabase } from '../lib/supabaseClient'
 
 const router = useRouter()
 
@@ -8,82 +9,84 @@ const title = ref('')
 const bv = ref('')
 const tabText = ref('')
 
-function generateId() {
-  // 简单可用的 id：时间戳 + 随机数
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
+const loading = ref(false)
+const error = ref('')
 
-function saveSong() {
+async function save() {
+  error.value = ''
+
   const t = title.value.trim()
   const b = bv.value.trim()
-  const tab = tabText.value
 
-  if (!t) {
-    alert('请填写标题')
-    return
+  if (!t) return alert('请填写标题')
+  if (!b) return alert('请填写 BV')
+
+  loading.value = true
+  try {
+    const { data: sess } = await supabase.auth.getSession()
+    const session = sess.session
+    if (!session) {
+      router.push('/auth')
+      return
+    }
+
+    const { data, error: e } = await supabase
+      .from('songs')
+      .insert({
+        user_id: session.user.id,
+        title: t,
+        bv: b,
+        tab_text: tabText.value ?? '',
+      })
+      .select('id')
+      .single()
+
+    if (e) throw e
+    router.push(`/songs/${data.id}`)
+  } catch (e) {
+    error.value = e?.message ?? String(e)
+  } finally {
+    loading.value = false
   }
-  if (!b) {
-    alert('请填写 BV 号')
-    return
-  }
-
-  const id = generateId()
-
-  const song = {
-    id,
-    title: t,
-    bv: b,
-    tabText: tab,
-    createdAt: new Date().toISOString(),
-  }
-
-  localStorage.setItem(`song:${id}`, JSON.stringify(song))
-  router.push('/')
 }
 </script>
 
 <template>
-  <div style="padding: 16px; display: grid; gap: 12px; max-width: 720px;">
-    <h1 style="margin: 0;">Upload</h1>
+  <div class="container">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+      <h1 style="margin:0;">Upload</h1>
+      <button @click="$router.push('/')">返回</button>
+    </div>
 
-    <label style="display: grid; gap: 6px;">
-      <span>标题</span>
-      <input
-        v-model="title"
-        placeholder="例如：Hotel California"
-        style="padding: 8px; border: 1px solid #ccc; border-radius: 6px;"
-      />
-    </label>
+    <div class="hr"></div>
 
-    <label style="display: grid; gap: 6px;">
-      <span>B 站 BV 号</span>
-      <input
-        v-model="bv"
-        placeholder="例如：BV1..."
-        style="padding: 8px; border: 1px solid #ccc; border-radius: 6px;"
-      />
-    </label>
+    <div style="display:grid; gap:12px; max-width: 720px;">
+      <div>
+        <div style="margin-bottom:6px;">标题</div>
+        <input v-model="title" placeholder="标题" style="width: 100%;" />
+      </div>
 
-    <label style="display: grid; gap: 6px;">
-      <span>曲谱文本</span>
-      <textarea
-        v-model="tabText"
-        rows="10"
-        placeholder="粘贴曲谱文本（可为空）"
-        style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;"
-      />
-    </label>
+      <div>
+        <div style="margin-bottom:6px;">BV</div>
+        <input v-model="bv" placeholder="BV1..." style="width: 100%;" />
+      </div>
 
-    <button
-      type="button"
-      @click="saveSong"
-      style="padding: 10px 12px; border-radius: 8px; border: 1px solid #111; background: #111; color: #fff; width: fit-content;"
-    >
-      保存并进入播放页
-    </button>
+      <div>
+        <div style="margin-bottom:6px;">谱子文本（可空）</div>
+        <textarea
+          v-model="tabText"
+          rows="10"
+          placeholder="粘贴谱子文本…"
+          style="width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;"
+        />
+      </div>
 
-    <p style="margin: 0; color: #666;">
-      说明：当前保存到 localStorage（后续再接后端）。
-    </p>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <button class="primary" :disabled="loading" @click="save">
+          {{ loading ? '保存中…' : '保存' }}
+        </button>
+        <span v-if="error" style="color:#b91c1c;">{{ error }}</span>
+      </div>
+    </div>
   </div>
 </template>
